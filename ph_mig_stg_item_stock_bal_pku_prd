@@ -1,0 +1,545 @@
+-- Function: phisdmi.ph_mig_stg_item_stock_bal_pku_prd(integer)
+
+-- DROP FUNCTION phisdmi.ph_mig_stg_item_stock_bal_pku_prd(integer);
+
+CREATE OR REPLACE FUNCTION phisdmi.ph_mig_stg_item_stock_bal_pku_prd(integer)
+  RETURNS integer AS
+$BODY$
+DECLARE
+stg_base_return_status integer := 1;
+
+log_code integer;
+log_loc text;
+log_dir text;
+
+row_count integer;
+row_queried integer;
+
+eff_row integer := 0;
+chksum float := 0.00;
+
+eff_row_p integer := 0;
+chksum_p float := 0.00;
+
+eff_row_b integer := 0;
+chksum_b float := 0.00;
+
+ts_date text;
+
+-- source_stat text;
+sel_stat text;
+copy_stat text;
+rej_stat text;
+arc_stat text;
+pro_stat text;
+
+temp_cur phisdmi.PH_DMI_ITEM_STOCK_BAL_DM%rowtype;
+sel_rec RECORD;
+inner_rec RECORD;
+group_rec RECORD;
+
+h_seqno integer;
+d_seqno integer;
+s_item_seqno integer;
+s_brnd_seqno integer;
+s_rqstr_seqno integer;
+s_stk_lot_no integer;
+gsq integer;
+
+rej_loc text;
+arc_loc text;
+pro_loc text;
+
+item_seq_no int;
+
+BEGIN
+--initialize process code
+--DM item stock balance
+
+--setting log_code with the IN parameter
+log_code = $1;
+
+--select nextval('"PROCESS_SEQ"') into log_code;
+--PERFORM man_log('Initializing..', log_code);
+--RAISE NOTICE 'Initializing..';
+
+--initialize row count from temporary table into staging table
+row_count := 0;
+
+--timestamp date to be included into log filename
+ts_date :=  to_char(current_timestamp, 'DDMONYYYY');
+
+--specify log directory
+select DIR_LOC from phisdmi.PH_DMI_DIR WHERE DIR_CODE = 'DMI_LOG' into log_loc;
+--specify rej directory
+select DIR_LOC from phisdmi.PH_DMI_DIR WHERE DIR_CODE = 'DMI_REJ' into rej_loc;
+--specify arc directory
+select DIR_LOC from phisdmi.PH_DMI_DIR WHERE DIR_CODE = 'DMI_ARC' into arc_loc;
+
+--log_loc := 'C:/PHIS/DMI/LOG/';
+--rej_loc := 'C:/PHIS/DMI/REJ/';
+--arc_loc := 'C:/PHIS/DMI/ARC/';
+
+--create log filename
+log_dir := log_loc ||'PH_DMI_ITEM_STOCK_BAL_DM_U_' || ts_date || '.log';
+pro_loc := log_loc ||'PH_DMI_ITEM_STOCK_BAL_DM_PROCESS_' || ts_date || '.log';
+
+--create reject filename
+rej_loc := rej_loc ||'PH_DMI_ITEM_STOCK_BAL_DM_U_' || ts_date || '.rej';
+
+--create arcive filename
+arc_loc := arc_loc ||'PH_DMI_ITEM_STOCK_BAL_DM_U_' || ts_date || '.arc';
+
+--clears the staging table (not used in UPLOAD)
+--TRUNCATE TABLE for_mig_test;
+
+--VALIDATE
+PERFORM phisdmi.ph_dmi_manual_log('Validating the staging table PH_DMI_ITEM_STOCK_BAL_DM..', log_code);
+RAISE NOTICE 'Validating the staging table PH_DMI_ITEM_STOCK_BAL_DM..';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+SET uom = 'bott'
+where uom = 'BOT';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+SET uom = 'pck'
+where uom = 'PKT';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+SET uom = 'vial'
+where uom = 'VIL';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+SET uom = 'pcs'
+where uom = 'PCE';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+SET uom = 'tube'
+where uom = 'TUB';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+SET uom = 'L'
+where uom = 'LTR';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+SET uom = 'roll'
+where uom = 'ROL';
+
+--RAISE NOTICE 'V1'; 
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET DMI_STATUS = 'E'
+      ,DMI_ERROR = 'First Row (Heading)'
+ WHERE item_code = 'Item Code';
+ 
+--RAISE NOTICE 'V2'; 
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET DMI_STATUS = 'E'
+      ,DMI_ERROR = 'THE COLUMN item_code IS NULL'
+ WHERE (item_code IS NULL
+    OR item_code = '');
+
+for group_rec in select item_code 
+		   from phisdmi.PH_DMI_ITEM_STOCK_BAL_DM 
+		  where trim(item_code) in (select legacy_item_code from phisdmi.ph_dmi_item_map) loop
+	UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM isb
+	   SET original_item_code = group_rec.item_code
+	      ,item_code = trim(mi.phis_item_code)						--in order to keep using item_code
+	  FROM phisdmi.ph_dmi_item_map mi
+	 WHERE trim(isb.item_code) = trim(mi.legacy_item_code)
+	   AND isb.DMI_STATUS = 'R';
+end loop;
+    
+--RAISE NOTICE 'V3'; 
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET DMI_STATUS = 'E'										--should be 'E' once item master list available
+      ,DMI_ERROR = 'item_code DOES NOT EXISTS IN ph_items'
+ WHERE trim(item_code) not in (select trim(item_code) from phisprod.ph_items)
+   and item_code != 'Item Code';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET DMI_STATUS = 'E'										--should be 'E' once item master list available
+      ,DMI_ERROR = 'item_code DOES NOT EXISTS IN ph_item_brands'
+ WHERE trim(item_code) not in (select trim(item_code) from phisprod.ph_items i, phisprod.ph_item_brands ib where i.item_seqno = ib.item_seqno)
+   and item_code != 'Item Code';
+
+/* for group_rec in select count(1) grp_cnt
+		       ,item_code
+		       ,batch_no
+		       ,good_stock_quantity
+		   from phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+	          group by item_code, batch_no, good_ stock_quantity loop
+   if group_rec.grp_cnt > 1 then
+	UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+	   SET DMI_STATUS = 'E'
+	      ,DMI_ERROR = 'MULTIPLE item_code with the SAME batch no'
+	 WHERE item_code = group_rec.item_code
+	   AND batch_no = group_rec.batch_no
+	   AND good_stock_quantity = group_rec.good_stock_quantity;
+   end if;
+end loop; */
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET unit_price = '0'
+ WHERE (unit_price IS NULL
+    OR unit_price = '');
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET good_stock_quantity = '0'
+ WHERE (good_stock_quantity IS NULL
+    OR good_stock_quantity = '');
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM isb
+   SET drug_seqno = i.drug_seqno
+  FROM phisprod.ph_items i
+ WHERE trim(isb.item_code) = i.item_code
+   AND isb.DMI_STATUS = 'R';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM isb
+   SET nondrug_seqno = i.nondrug_seqno
+  FROM phisprod.ph_items i
+ WHERE trim(isb.item_code) = i.item_code
+   AND isb.DMI_STATUS = 'R';
+   
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET sku = uom
+where DMI_STATUS = 'R';
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM isb
+   SET sku = d.uom_abbreviation
+from ph_items b,
+     ph_drugs c,
+     ph_uoms d 
+where b.conversion_factor > 1
+and isb.item_code = b.item_code
+and b.drug_seqno = c.drug_seqno
+and c.sku_uom_seqno = d.uom_seqno
+AND isb.DMI_STATUS = 'R'; 
+
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM isb
+   SET sku = i.uom_abbreviation
+  FROM phisprod.ph_uoms i
+ WHERE UPPER(trim(isb.sku)) = UPPER(trim(i.uom_abbreviation))
+   AND isb.DMI_STATUS = 'R';
+
+--If in HIS is PKU, use this function to convert into SKU
+UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM isb
+   SET good_quantity = i.conversion_factor * cast(isb.good_stock_quantity AS NUMERIC)
+  FROM phisprod.ph_items i
+ WHERE trim(isb.item_code) = i.item_code
+   AND isb.DMI_STATUS = 'R';
+
+
+ UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM isb
+   SET price =cast(isb.unit_price AS NUMERIC) /  i.conversion_factor 
+  FROM phisprod.ph_items i
+ WHERE trim(isb.item_code) = i.item_code
+   AND isb.DMI_STATUS = 'R';
+
+/* UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+   SET DMI_STATUS = 'E'
+      ,DMI_ERROR = '0 good stock quantity'
+ WHERE trim(good_stock_quantity) = '0'; */
+ 
+
+/*need validation for requester unit*/
+
+for group_rec in select count(1) grp_cnt
+		       ,batch_no
+		       ,item_code
+		   from phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+		  where DMI_STATUS = 'R'
+		    --and trim(item_code) = '25.3900.01'
+		    --and trim(batch_no) = '11050001'
+		  group by batch_no, item_code loop
+   if group_rec.grp_cnt > 1 then
+	UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+	   SET DMI_STATUS = 'E'
+	      ,DMI_ERROR = 'SAME item_code with the MULTIPLE batch no'
+	 WHERE item_code = group_rec.item_code
+	   AND batch_no = group_rec.batch_no;
+   end if;
+end loop;
+
+PERFORM phisdmi.ph_dmi_manual_log('Validation complete..', log_code);
+RAISE NOTICE 'Validation complete..';
+
+--count error row(s) in staging table
+IF FOUND THEN
+  GET DIAGNOSTICS row_queried = ROW_COUNT;
+  PERFORM phisdmi.ph_dmi_manual_log('Updated '|| row_queried ||' row(s) with error in PH_DMI_ITEM_STOCK_BAL_DM table', log_code);
+  RAISE NOTICE 'Updated % row(s) with error in PH_DMI_ITEM_STOCK_BAL_DM table', row_queried;
+END IF;
+
+--moving the error row(s) into REJ folder
+PERFORM phisdmi.ph_dmi_manual_log('Moving rejected row(s) into the REJ folder..', log_code);
+RAISE NOTICE 'Moving rejected row(s) into the REJ folder..';
+REJ_STAT := 'COPY (SELECT item_code
+			 ,batch_no
+			 ,item_description
+			 ,receipt_type
+			 ,unit_price
+			 ,good_stock_quantity
+			 ,DMI_ERROR 
+		     FROM phisdmi.PH_DMI_ITEM_STOCK_BAL_DM WHERE DMI_STATUS = ''E'') TO ' || QUOTE_LITERAL(REJ_LOC) || ' WITH CSV HEADER DELIMITER ''|'' NULL ''null''';
+execute rej_stat;
+
+--UPLOAD
+PERFORM phisdmi.ph_dmi_manual_log('Uploading the staging table PH_DMI_ITEM_STOCK_BAL_DM into ph_items..', log_code);
+RAISE NOTICE 'Uploading the staging table PH_DMI_ITEM_STOCK_BAL_DM into PH_CURRENTSTK_HDRS..';
+
+--loop staging to upload 1-by-1
+--RAISE NOTICE 'enter..';
+for temp_cur in select * from phisdmi.PH_DMI_ITEM_STOCK_BAL_DM WHERE DMI_STATUS = 'R' and good_quantity <> '0' loop
+--RAISE NOTICE 'enter loop..';
+
+	select item_seqno from phisprod.ph_items where item_code = trim(temp_cur.item_code) into s_item_seqno;
+
+--RAISE NOTICE 'Item Brands Check';
+	select brnd_seqno from phisprod.ph_item_brands where item_seqno = s_item_seqno into s_brnd_seqno;
+	
+	select rqstr_seqno from phisprod.ph_requester_units where rqstr_code = 'PS001'  into s_rqstr_seqno;
+
+RAISE NOTICE 'Loop check';
+	IF NOT EXISTS (SELECT 1 
+			  FROM phisprod.ph_currentstk_hdrs BTH
+			      ,phisprod.ph_currentstk_dtls BTD
+			 WHERE BTH.stk_lot_no = BTD.stk_lot_no
+			   AND BTH.item_seqno = s_item_seqno --to_number(temp_cur.unit_code,'9999999')
+			   AND BTD.batch_no = trim(temp_cur.batch_no)
+			   --AND BTD.stk_available_qty = temp_cur.good_quantity 
+			   ) THEN --until item master list
+--RAISE NOTICE 'enter if..';
+		--insert into base
+
+		--item_seq_no = nextval('phisprod.ph_item_seq');
+--RAISE NOTICE '1st..';
+--RAISE NOTICE 'item_seq_no : %', temp_cur.unit_code;
+--RAISE NOTICE 'item_code : %', temp_cur.item_code;
+--RAISE NOTICE 'brand_seq : %', s_brnd_seqno;
+RAISE NOTICE 'nextval check';
+	select nextval('phisprod.ph_currentstk_hdrs_seq') into h_seqno;
+
+
+--RAISE NOTICE 'enter loop v2..';	
+--RAISE NOTICE 'h_seq : %', h_seqno;
+RAISE NOTICE '1st..';
+
+	IF NOT EXISTS (select 1
+			 from phisprod.ph_currentstk_hdrs
+			where rqstr_seqno = s_rqstr_seqno
+			  and item_seqno = s_item_seqno
+			  and brd_seqno = s_brnd_seqno) THEN 
+		INSERT INTO phisprod.ph_currentstk_hdrs (stk_lot_no
+							,item_seqno
+							,stk_item_group
+							,drug_seqno
+							,active_flag
+							,brd_seqno
+							,unit_price
+							,stk_sku
+							,rqstr_seqno
+							,created_by
+							,created_date
+							,updated_by
+							,updated_date
+							,nondrug_seqno)
+						 values
+						       (h_seqno
+						       ,s_item_seqno --to_number(temp_cur.unit_code, '9999999')
+						       ,trim(temp_cur.item_group)
+						       ,temp_cur.drug_seqno --1088 --added 01042013 for test upload
+						       ,'A'
+						       ,s_brnd_seqno --727 --added 01042013 for test upload
+						       ,temp_cur.price
+						       ,trim(temp_cur.sku)
+						       ,s_rqstr_seqno --unit_code --added 01042013 for test upload
+						       ,2
+						       ,now()
+						       ,2					       
+						       ,now()
+						       ,temp_cur.nondrug_seqno); --added 01042013 for test upload
+	END IF;
+					        
+RAISE NOTICE 'h_seq : %', h_seqno;
+RAISE NOTICE 'batch_no : %', temp_cur.batch_no;
+RAISE NOTICE '2nd..';
+
+
+--RAISE NOTICE 'enter loop v3..';	
+	select stk_lot_no from phisprod.ph_currentstk_hdrs where item_seqno = s_item_seqno into s_stk_lot_no;
+
+	INSERT INTO phisprod.ph_currentstk_dtls (stkdtls_seqno
+						,stk_lot_no
+						,batch_no
+						,stk_unit_price
+						,stk_expiry_date
+						,stk_receive_date --added 01042013 for test upload	
+						,stk_sku
+						,stk_available_qty
+						,stk_allocated_qty
+						,stk_temp_condemn_qty
+						,stk_quarantined_flag
+						,stk_dispensed_qty
+						,stk_bad_stock_qty
+						,active_flag --added 01042013 for test upload
+						,batch_expiry_date --added 01042013 for test upload
+						,pack_desc --added 01042013 for test upload
+						,stk_quarantine_qty --added 01042013 for test upload
+						,created_by
+						,created_date
+						,updated_by					        
+						,updated_date)
+						values
+						(nextval('phisprod.ph_currentstk_dtls_seq')
+						,s_stk_lot_no
+						,trim(temp_cur.batch_no)
+						,temp_cur.price
+						,to_date(trim(temp_cur.expiry_date), 'DD-MON-YY')						
+						,null --added 01042013 for test upload
+						,trim(temp_cur.sku)
+						,temp_cur.good_quantity
+						,0
+						,0
+						,'N'
+						,0
+						,0
+						,'A' --added 01042013 for test upload
+						,to_date(trim(temp_cur.expiry_date), 'DD-MON-YY') --added 01042013 for test upload
+						,null --added 01042013 for test upload
+						,0 --added 01042013 for test upload						
+						,2
+						,now()
+						,2						
+						,now());
+						
+						
+RAISE NOTICE 'h_seq : %', h_seqno;
+RAISE NOTICE 'Units : %', temp_cur.unit_code;
+RAISE NOTICE 'batch_no : %', temp_cur.batch_no;
+RAISE NOTICE '3rd..';
+--RAISE NOTICE 'Uploading the staging table PH_DMI_ITEM_STOCK_BAL into ph_stk_movements..';
+
+	--select stk_lot_no from phisprod.ph_stk_movements where item_seqno = temp_cur.item_seqno into s_stk_lot_no;
+
+	INSERT INTO phisprod.ph_stk_movements (movements_seqno
+						,movement_type
+						,req_unit_no
+						,financial_year
+						,ref_no 
+						,opening_balance_qty
+						,balance_qty
+						,transaction_name
+						,edo_no
+						,item_seqno
+						,quantity
+						,transaction_amount
+						,year_start_date 
+						,year_end_date
+						,created_by
+						,updated_by					        
+						,quarantine_stk_before
+						,quarantine_stk_after
+						,bad_stock_before
+						,bad_stk_after)
+				values
+						(nextval('phisprod.ph_stk_movements_seq')
+						,'ADDITION'
+						,s_rqstr_seqno
+						,2014 --date_part('Year', now())
+						,0					
+						,0 --opening quantity
+						,temp_cur.good_quantity  --balance quantity
+						,'DM' --transaction_name from ref_codes
+						,null
+						,s_item_seqno
+						,temp_cur.good_quantity --quantity stock added 
+						,0.0000 --value of quantity * prices
+						,now()
+						,now()				
+						,2
+						,2
+						,0
+						,0
+						,0
+						,0);
+					       
+--RAISE NOTICE 'item code.. %', temp_cur.item_code;
+--RAISE NOTICE 'updating..';
+		--update row to S
+		UPDATE phisdmi.PH_DMI_ITEM_STOCK_BAL_DM
+		   SET DMI_STATUS = 'S'
+		 WHERE DMI_STATUS = 'R'
+		   AND item_code = temp_cur.item_code
+		   AND good_quantity = temp_cur.good_quantity;
+--RAISE NOTICE 'check sum add..';
+		--effected row count
+		--eff_row_p = eff_row_p + 1;
+
+		if temp_cur.receipt_type = 'B' or temp_cur.receipt_type = 'R' or temp_cur.receipt_type = 'BO' then
+			eff_row_b = eff_row_b + 1;
+			chksum_b = chksum_b + temp_cur.good_quantity;
+		else
+			eff_row_p = eff_row_p + 1;
+			chksum_p = chksum_p + temp_cur.good_quantity;
+		end if;
+	--else
+	--RAISE NOTICE 'unit.. %', temp_cur.unit_code;
+	end if;
+--RAISE NOTICE 'exit if..';
+end loop;
+
+--put into log
+PERFORM phisdmi.ph_dmi_manual_log('Inserted '|| eff_row ||' row(s) into ITEM_STOCK_BAL_BASE table', log_code);
+RAISE NOTICE 'Inserted % row(s) into ITEM_STOCK_BAL_BASE table', eff_row;
+
+PERFORM phisdmi.ph_dmi_manual_log('Moving successful row(s) into the ARC folder..', log_code);
+RAISE NOTICE 'Moving successful row(s) into the ARC folder..';
+arc_stat := 'COPY (SELECT * FROM phisdmi.PH_DMI_ITEM_STOCK_BAL_DM where DMI_STATUS = ''S'') to ' || quote_literal(arc_loc) || ' WITH DELIMITER ''|'' NULL ''''';
+execute arc_stat;
+RAISE NOTICE 'Moving ARC folder loaded..';
+PERFORM phisdmi.ph_dmi_manual_log('Finished staging table Upload into base table', log_code);
+-- RAISE NOTICE 'Finished staging table Upload into base table';
+
+PERFORM phisdmi.ph_dmi_manual_log('---------------------------------------------------------------', log_code);
+PERFORM phisdmi.ph_dmi_manual_log('Item Stock Balance Row Count: ' || eff_row_p, log_code);
+RAISE NOTICE 'Item Stock Balance Row Count: %', eff_row_p;
+
+PERFORM phisdmi.ph_dmi_manual_log('Item Stock Balance Row Count: ' || eff_row_b, log_code);
+RAISE NOTICE 'Item Stock Balance Bonus Row Count: %', eff_row_b;
+
+PERFORM phisdmi.ph_dmi_manual_log('Item Stock Balance Unit Price Checksum (Order Amount): ' || chksum_p, log_code);
+RAISE NOTICE 'Item Stock Balance Good Stock Checksum: %', chksum_p;
+
+PERFORM phisdmi.ph_dmi_manual_log('Item Stock Balance Unit Price Checksum (Order Amount): ' || chksum_b, log_code);
+RAISE NOTICE 'Item Stock Balance Bonus Good Stock Checksum: %', chksum_b;
+
+PERFORM phisdmi.ph_dmi_manual_log('The record list in in ' || log_dir, log_code);
+
+/***************************************************************************************************************************************/
+RAISE NOTICE 'Writing log..';
+--LOG WRITE***
+--log file copy out statement
+
+--sel_stat := 'COPY (SELECT * FROM phisdmi.PH_DMI_ITEM_STOCK_BAL_DM WHERE DMI_STATUS = ''S'' AND (DMI_ERROR IS NULL OR DMI_ERROR = '''')) TO ' || QUOTE_LITERAL(log_dir) || ' WITH CSV HEADER DELIMITER ''|'' NULL ''''';
+sel_stat := 'COPY (SELECT * FROM phisdmi.PH_DMI_ITEM_STOCK_BAL_DM WHERE DMI_STATUS = ''S'') TO ' || QUOTE_LITERAL(log_dir) || ' WITH CSV HEADER DELIMITER ''|'' NULL ''''';
+execute sel_stat;
+
+RAISE NOTICE 'Writing process log..';
+--pro_stat := 'SELECT "LOG_RECORDS", "LOG_TIME" FROM phisdmi.ph_dmi_process_log where "LOG_CODE" = ' || log_code;
+--copy out log file
+--copy_stat := 'COPY ('|| pro_stat ||') to ' || quote_literal(pro_loc);
+pro_stat := 'COPY (SELECT "LOG_RECORDS", "LOG_TIME" FROM phisdmi.ph_dmi_process_log where "LOG_CODE" = ' || log_code || ') to ' || quote_literal(pro_loc);
+execute pro_stat;
+
+return stg_base_return_status;
+
+EXCEPTION WHEN OTHERS THEN 
+RAISE NOTICE 'PLPGSQL ERROR, ERROR CODE: %', SQLSTATE;
+	stg_base_return_status = 0;
+	return stg_base_return_status;
+END;
+$BODY$
+  LANGUAGE plpgsql VOLATILE
+  COST 100;
+ALTER FUNCTION phisdmi.ph_mig_stg_item_stock_bal_pku_prd(integer)
+  OWNER TO ihisblank;
